@@ -1,0 +1,17 @@
+Source: krypy
+Section: python
+Priority: optional
+Maintainer: André Gaul <gaul@web-yard.de>
+Build-Depends: debhelper (>= 7.0.50~)
+Standards-Version: 3.9.3
+Homepage: https://github.com/andrenarchy/krypy
+
+Package: python-krypy
+Architecture: all
+Depends: python-pkg-resources, ${misc:Depends}, ${python:Depends}, 
+ python-numpy, python-scipy, python-nose
+Description: Krylov subspace methods for Python
+ KryPy is a Python module for Krylov subspace methods for the solution of
+ linear algebraic systems. This includes enhanced versions of CG, MINRES
+ and GMRES as well as methods for the efficient solution of sequences of
+ linear systems.
