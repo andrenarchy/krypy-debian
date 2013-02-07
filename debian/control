@@ -2,7 +2,7 @@ Source: krypy
 Section: python
 Priority: optional
 Maintainer: André Gaul <gaul@web-yard.de>
-Build-Depends: debhelper (>= 7.0.50~)
+Build-Depends: debhelper (>= 7.0.50~), python-all, python-setuptools
 Standards-Version: 3.9.3
 Homepage: https://github.com/andrenarchy/krypy
 

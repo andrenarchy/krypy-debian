@@ -1,3 +1,9 @@
+krypy (0.1ubuntu1) quantal; urgency=low
+
+  * fix dependency
+
+ -- André Gaul <gaul@web-yard.de>  Tue, 05 Feb 2013 18:22:45 +0100
+
 krypy (0.1) quantal; urgency=low
 
   * Initial release.
