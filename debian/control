@@ -6,7 +6,7 @@ Build-Depends: debhelper (>= 7.0.50~), python-all, python-setuptools
 Standards-Version: 3.9.4
 Homepage: https://github.com/andrenarchy/krypy
 Vcs-Browser: https://github.com/andrenarchy/krypy-debian
-Vcs-Git: git@github.com:andrenarchy/krypy-debian.git
+Vcs-Git: https://github.com/andrenarchy/krypy-debian.git
 
 Package: python-krypy
 Architecture: all
