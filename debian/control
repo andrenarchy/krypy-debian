@@ -2,17 +2,30 @@ Source: krypy
 Section: python
 Priority: optional
 Maintainer: André Gaul <gaul@web-yard.de>
-Build-Depends: debhelper (>= 7.0.50~), python-all, python-setuptools
+Build-Depends: debhelper (>= 7.0.50~), python-all, python-setuptools,
+ python3-all, python3-setuptools
 Standards-Version: 3.9.4
 Homepage: https://github.com/andrenarchy/krypy
 Vcs-Browser: https://github.com/andrenarchy/krypy-debian
 Vcs-Git: https://github.com/andrenarchy/krypy-debian.git
+X-Python-Version: >= 2.7
+X-Python-Version: >= 3.2
 
 Package: python-krypy
 Architecture: all
-Depends: python-pkg-resources, ${misc:Depends}, ${python:Depends}, 
+Depends: python-pkg-resources, ${misc:Depends}, ${python:Depends},
  python-numpy, python-scipy, python-nose
 Description: Krylov subspace methods for Python
+ KryPy is a Python module for Krylov subspace methods for the solution of
+ linear algebraic systems. This includes enhanced versions of CG, MINRES
+ and GMRES as well as methods for the efficient solution of sequences of
+ linear systems.
+
+Package: python3-krypy
+Architecture: all
+Depends: python3-pkg-resources, ${misc:Depends}, ${python3:Depends},
+ python3-numpy, python3-scipy, python3-nose
+Description: Krylov subspace methods for Python (Python 3 package)
  KryPy is a Python module for Krylov subspace methods for the solution of
  linear algebraic systems. This includes enhanced versions of CG, MINRES
  and GMRES as well as methods for the efficient solution of sequences of
