@@ -1,49 +1,144 @@
 # -*- coding: utf8 -*-
 import numpy
 import warnings
-from scipy.sparse.sputils import upcast
-from scipy.sparse import issparse, isspmatrix
+from scipy.sparse.linalg import aslinearoperator
 from . import utils
 
-def cg(A, b, 
+def cg(A, b,
        x0 = None,
        tol = 1.0e-5,
        maxiter = None,
        M = None,
        Ml = None,
        Mr = None,
-       inner_product = utils.ip,
+       inner_product = utils.ip_euclid,
        explicit_residual = False,
-       return_basis = False,
-       full_reortho = False,
        exact_solution = None
        ):
-    '''Conjugate gradient method with different inner product.
+    '''Preconditioned CG method.
+
+    The *preconditioned conjugate gradient method* can be used to solve a
+    system of linear algebraic equations where the linear operator is
+    self-adjoint and positive definite. Let the following linear algebraic
+    system be given:
+
+    .. math::
+
+      M M_l A M_r y = M M_l b,
+
+    where :math:`x=M_r y` and :math:`M_l A M_r` is self-adjoint and
+    positive definite with respect to the inner product
+    :math:`\\langle \\cdot,\\cdot \\rangle` defined by ``inner_product``.
+    The preconditioned CG method then computes (in exact arithmetics!)
+    iterates :math:`x_k \\in x_0 + M_r K_k` with
+    :math:`K_k:= K_k(M M_l A M_r, r_0)` such that
+
+    .. math::
+
+      \\|x - x_k\\|_A = \\min_{z \\in x_0 + M_r K_k} \\|x - z\\|_A.
+
+    The Lanczos alorithm is used with the operator
+    :math:`M M_l A M_r` and the inner product defined by
+    :math:`\\langle x,y \\rangle_{M^{-1}} = \\langle M^{-1}x,y \\rangle`.
+    The initial vector for Lanczos is
+    :math:`r_0 = M M_l (b - Ax_0)` - note that :math:`M_r` is not used for
+    the initial vector.
+
+    Memory consumption is:
+
+    * if ``return_basis==False``: 3 vectors or 6 vectors if :math:`M` is used.
+    * if ``return_basis==True``: about maxiter+1 vectors for the Lanczos basis.
+      If :math:`M` is used the memory consumption is 2*(maxiter+1).
+
+    **Caution:** CG's convergence may be delayed significantly due to round-off
+    errors, cf. chapter 5.9 in *Liesen, Strakos. Krylov subspace Methods.
+    2013.*
+
+    :param A:
+      a linear operator on :math:`\\mathbb{C}^N`. Note that
+      :math:`M_l A M_r` has to be self-adjoint and positive definite in the
+      inner product.
+    :param b:
+      a vector in :math:`\\mathbb{C}^N`.
+    :param x0: (optional) the initial guess to use. Defaults to zero vector.
+      Unless you have a good reason to use a nonzero initial guess you should
+      use the zero vector, cf. chapter 5.8.3 in *Liesen, Strakos. Krylov
+      subspace methods. 2013*. See also :py:meth:`~krypy.utils.hegedus`.
+    :param tol: (optional) the tolerance for the stopping criterion with respect to
+      the relative residual norm:
+
+      .. math::
+
+         \\frac{ \\| M M_l (b-A (x_0+M_r y_k))\\|_{M^{-1}} }{ \\|M M_l b\\|_{M^{-1}}}
+         \leq \\text{tol}
+
+    :param maxiter: (optional) maximum number of iterations. Defaults to N.
+    :param M: (optional)
+      a self-adjoint and positive definite preconditioner, linear operator on
+      :math:`\\mathbb{C}^N` with respect to ``inner_product``. This
+      preconditioner changes the inner product used for orthogonalization to
+      :math:`\\langle x,y\\rangle_M = \\langle Mx,y\\rangle` where
+      :math:`\\langle \\cdot,\\cdot\\rangle` is the inner product defined
+      by the parameter ``inner_product``. Defaults to the identity.
+    :param Ml: (optional) left preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`. Defaults to the identity.
+    :param Mr: (optional) right preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`. Defaults to the identity.
+    :param inner_product: (optional) a function that takes two arguments and
+      computes the (block-) inner product of the arguments. Defaults to
+      :py:meth:`~krypy.utils.ip_euclid`.
+    :param explicit_residual: (optional)
+      if set to ``False`` (default), the updated residual norm from the CG
+      iteration is used in each iteration. If set to ``True``, the residual is
+      computed explicitly in each iteration and thus requires an additional
+      matrix-vector multiplication in each iteration.
+    :param exact_solution: (optional)
+      if the solution vector :math:`x` is passed then the error norm
+      :math:`\|x-x_k\|` will be computed in each iteration (with respect
+      to ``inner_product``) and returned as a list in the result dictionary
+      with the key ``errvec``. Defaults to ``None``, which means that no
+      errors are computed.
+
+    :return:
+      a dictionary with the following keys:
+
+      * ``xk``: the approximate solution :math:`x_k`.
+      * ``info``: convergence flag (0 if converged, 1 otherwise).
+      * ``relresvec``: relative residual norms of all iterations, see
+        parameter ``tol``.
     '''
-    if return_basis or full_reortho:
-        raise RuntimeError('return_basis/full_reortho not yet implemented for CG.')
 
     N = len(b)
+    shape = (N,N)
+    A = utils.get_linearoperator(shape, A)
     if maxiter is None:
         maxiter = N
     flat_vecs, (b, x0, exact_solution) = utils.shape_vecs(b, x0, exact_solution)
     if x0 is None:
         x0 = numpy.zeros((N,1))
+    M = utils.get_linearoperator(shape, M)
+    Ml = utils.get_linearoperator(shape, Ml)
+    Mr = utils.get_linearoperator(shape, Mr)
     cdtype = utils.find_common_dtype(A, b, x0, M, Ml, Mr)
 
     # Compute M-norm of M*Ml*b.
-    Mlb = utils.apply(Ml, b)
-    MMlb = utils.apply(M, Mlb)
+    Mlb = Ml * b
+    MMlb = M * Mlb
     norm_MMlb = utils.norm(Mlb, MMlb, inner_product = inner_product)
 
     # Init Lanczos and CG
-    r0 = b - utils.apply(A, x0)
-    Mlr0 = utils.apply(Ml, r0)
-    MMlr0 = utils.apply(M, Mlr0)
+    r0 = b - A * x0
+    Mlr0 = Ml * r0
+    MMlr0 = M * Mlr0
     norm_MMlr0 = utils.norm(Mlr0, MMlr0, inner_product = inner_product)
 
-    # initial relative residual norm
-    relresvec = [norm_MMlr0 / norm_MMlb]
+    # if rhs is exactly(!) zero, return zero solution.
+    if norm_MMlb==0:
+        x0 = numpy.zeros((N,1))
+        relresvec = [0.0]
+    else:
+        # initial relative residual norm
+        relresvec = [norm_MMlr0 / norm_MMlb]
 
     # compute error?
     if exact_solution is not None:
@@ -52,7 +147,6 @@ def cg(A, b,
     # resulting approximation is xk = x0 + Mr*yk
     yk = numpy.zeros((N,1), dtype=cdtype)
     xk = x0.copy()
-    info = 0
 
     rho_old = norm_MMlr0**2
 
@@ -66,9 +160,9 @@ def cg(A, b,
             # update the search direction
             p = MMlr + rho_new/rho_old * p
             rho_old = rho_new
-        Ap = utils.apply(Mr, p)
-        Ap = utils.apply(A, Ap)
-        Ap = utils.apply(Ml, Ap)
+        Ap = Mr * p
+        Ap = A * Ap
+        Ap = Ml * Ap
 
         # update current guess and residual
         alpha = rho_old / inner_product( p, Ap )
@@ -78,7 +172,7 @@ def cg(A, b,
         yk += alpha * p
 
         if exact_solution is not None:
-            xk = x0 + utils.apply(Mr, yk)
+            xk = x0 + Mr * yk
             errvec.append(utils.norm(exact_solution - xk, inner_product=inner_product))
 
         if explicit_residual:
@@ -87,7 +181,7 @@ def cg(A, b,
             rho_new = norm_MMlr**2
         else:
             Mlr -= alpha * Ap
-            MMlr = utils.apply(M, Mlr)
+            MMlr = M * Mlr
             rho_new = utils.norm_squared( Mlr, MMlr, inner_product = inner_product )
             relresvec.append( numpy.sqrt(rho_new) / norm_MMlb )
 
@@ -105,7 +199,6 @@ def cg(A, b,
                 if k+1 == maxiter:
                     warnings.warn('Iter %d: No convergence! expl. res = %e >= tol =%e in last iter. (upd. res = %e)' \
                         % (k+1, relresvec[-1], tol, norm_r_upd))
-                    info = 1
                 else:
                     warnings.warn(('Iter %d: Updated residual is below tolerance, '
                                 + 'explicit residual is NOT!\n  (resEx=%g > tol=%g >= '
@@ -114,7 +207,7 @@ def cg(A, b,
         k += 1
 
     ret = { 'xk': xk if not flat_vecs else numpy.ndarray.flatten(xk),
-            'info': info,
+            'info': relresvec[-1] <= tol,
             'relresvec': relresvec
             }
     if exact_solution is not None:
@@ -123,78 +216,152 @@ def cg(A, b,
     return ret
 
 # ==============================================================================
-def minres(A, b, 
+def minres(A, b,
            x0 = None,
            tol = 1e-5,
            maxiter = None,
            M = None,
            Ml = None,
            Mr = None,
-           inner_product = utils.ip,
+           inner_product = utils.ip_euclid,
            explicit_residual = False,
            return_basis = False,
            full_reortho = False,
-           exact_solution = None,
-           timer = False
+           exact_solution = None
            ):
-    '''Preconditioned MINRES
+    '''Preconditioned MINRES method.
 
-    This MINRES solves M*Ml*A*Mr*y = M*Ml*b,  x=Mr*y
-    where Ml and Mr have to be such that Ml*A*Mr is self-adjoint in the
-    inner_product. M has to be self-adjoint and positive-definite w.r.t.
-    inner_product.
+    The *preconditioned minimal residual method* can be used to solve a
+    system of linear algebraic equations where the linear operator is
+    self-adjoint. Let the following linear algebraic
+    system be given:
 
-    Details:
-    The Lanczos procedure is used with the operator M*Ml*A*Mr and the
-    inner product defined by inner_product(M^{-1}x,y). The initial vector
-    for Lanczos is r0 = M*Ml*(b - A*x0) -- note that Mr is not used for
-    the initial vector!
+    .. math::
 
-    Stopping criterion is
-    ||M*Ml*(b-A*(x0+Mr*yk))||_{M^{-1}} / ||M*Ml*b||_{M^{-1}} <= tol
+      M M_l A M_r y = M M_l b,
+
+    where :math:`x=M_r y` and :math:`M_l A M_r` is self-adjoint with respect
+    to the inner product
+    :math:`\\langle \\cdot,\\cdot \\rangle` defined by ``inner_product``.
+    The preconditioned MINRES method then computes (in exact arithmetics!)
+    iterates :math:`x_k \\in x_0 + M_r K_k` with
+    :math:`K_k:= K_k(M M_l A M_r, r_0)` such that
+
+    .. math::
+
+      \\|M M_l(b - A x_k)\\|_{M^{-1}} =
+      \\min_{z \\in x_0 + M_r K_k} \\|M M_l (b - A z)\\|_{M^{-1}}.
+
+    The Lanczos alorithm is used with the operator
+    :math:`M M_l A M_r` and the inner product defined by
+    :math:`\\langle x,y \\rangle_{M^{-1}} = \\langle M^{-1}x,y \\rangle`.
+    The initial vector for Lanczos is
+    :math:`r_0 = M M_l (b - Ax_0)` - note that :math:`M_r` is not used for
+    the initial vector.
+
+    Memory consumption is:
+
+    * if ``return_basis==False``: 3 vectors or 6 vectors if :math:`M` is used.
+    * if ``return_basis==True``: about maxiter+1 vectors for the Lanczos basis.
+      If :math:`M` is used the memory consumption is 2*(maxiter+1).
+
+    **Caution:** MINRES' convergence may be delayed significantly or even
+    stagnate due to round-off errors, cf. chapter 5.9 in *Liesen, Strakos.
+    Krylov subspace Methods. 2013.*
+
+    :param A:
+      a linear operator on :math:`\\mathbb{C}^N`. Note that
+      :math:`M_l A M_r` has to be self-adjoint in the inner product.
+    :param b:
+      a vector in :math:`\\mathbb{C}^N`.
+    :param x0: (optional) the initial guess to use. Defaults to zero vector.
+      Unless you have a good reason to use a nonzero initial guess you should
+      use the zero vector, cf. chapter 5.8.3 in *Liesen, Strakos. Krylov
+      subspace methods. 2013*. See also :py:meth:`~krypy.utils.hegedus`.
+    :param tol: (optional) the tolerance for the stopping criterion with
+      respect to the relative residual norm:
+
+      .. math::
+
+         \\frac{ \\| M M_l (b-A (x_0+M_r y_k))\\|_{M^{-1}} }{ \\|M M_l b\\|_{M^{-1}}}
+         \leq \\text{tol}
+
+    :param maxiter: (optional) maximum number of iterations. Defaults to N.
+    :param M: (optional)
+      a self-adjoint and positive definite preconditioner, linear operator on
+      :math:`\\mathbb{C}^N` with respect to ``inner_product``. This
+      preconditioner changes the inner product used for orthogonalization to
+      :math:`\\langle x,y\\rangle_M = \\langle Mx,y\\rangle` where
+      :math:`\\langle \cdot,\cdot\\rangle` is the inner product defined by the
+      parameter ``inner_product``. Defaults to the identity.
+    :param Ml: (optional) left preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`. Defaults to the identity.
+    :param Mr: (optional) right preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`. Defaults to the identity.
+    :param inner_product: (optional) a function that takes two arguments and
+      computes the (block-) inner product of the arguments. Defaults to
+      :py:meth:`~krypy.utils.ip_euclid`.
+    :param explicit_residual: (optional)
+      if set to ``False`` (default), the updated residual norm from the MINRES
+      iteration is used in each iteration. If set to ``True``, the residual is
+      computed explicitly in each iteration and thus requires an additional
+      matrix-vector multiplication in each iteration.
+    :param return_basis: (optional)
+      if set to ``True`` then the computed Lanczos basis and the tridiagonal
+      matrix are returned in the result dictionary with the keys ``V``
+      and ``H``. Defaults to ``False``.
+    :param exact_solution: (optional)
+      if the solution vector :math:`x` is passed then the error norm
+      :math:`\|x-x_k\|` will be computed in each iteration (with respect to
+      ``inner_product``) and returned as a list in the result dictionary with
+      the key ``errvec``. Defaults to ``None``, which means that no errors are
+      computed.
+
+    :return:
+      a dictionary with the following keys:
+
+      * ``xk``: the approximate solution :math:`x_k`.
+      * ``info``: convergence flag (0 if converged, 1 otherwise).
+      * ``relresvec``: relative residual norms of all iterations, see
+        parameter ``tol``.
+      * ``V``: present if ``return_basis=True``. The Arnoldi basis
+        vectors.
+      * ``H``: present if ``return_basis=True``. The Hessenberg matrix.
+      * ``P``: present if ``return_basis=True`` and ``M`` is provided.
+        The matrix :math:`P` fulfills :math:`V=MP`.
     '''
     N = len(b)
+    shape = (N,N)
+    A = utils.get_linearoperator(shape, A)
     if maxiter is None:
         maxiter = N
     flat_vecs, (b, x0, exact_solution) = utils.shape_vecs(b, x0, exact_solution)
     if x0 is None:
         x0 = numpy.zeros((N,1))
+    M = utils.get_linearoperator(shape, M)
+    Ml = utils.get_linearoperator(shape, Ml)
+    Mr = utils.get_linearoperator(shape, Mr)
     cdtype = utils.find_common_dtype(A, b, x0, M, Ml, Mr)
 
-    if timer:
-        import time
-        times = {'setup': numpy.empty(1),
-                 'apply Ml*A*Mr': numpy.empty(maxiter),
-                 'Lanczos': numpy.empty(maxiter),
-                 'reortho': numpy.empty(maxiter),
-                 'apply prec': numpy.empty(maxiter),
-                 'extend Krylov': numpy.empty(maxiter),
-                 'construct full basis': numpy.empty(maxiter),
-                 'implicit QR': numpy.empty(maxiter),
-                 'update solution': numpy.empty(maxiter),
-                 'update residual': numpy.empty(maxiter)
-                 }
-    else:
-        times = None
-
-    if timer:
-        start = time.time()
-
     # Compute M-norm of M*Ml*b.
-    Mlb = utils.apply(Ml, b)
-    MMlb = utils.apply(M, Mlb)
+    Mlb = Ml * b
+    MMlb = M * Mlb
     norm_MMlb = utils.norm(Mlb, MMlb, inner_product = inner_product)
 
     # Init Lanczos and MINRES
-    r0 = b - utils.apply(A, x0)
-    Mlr0 = utils.apply(Ml, r0)
-    MMlr0 = utils.apply(M, Mlr0)
+    r0 = b - A * x0
+    Mlr0 = Ml * r0
+    MMlr0 = M * Mlr0
     norm_MMlr0 = utils.norm(Mlr0, MMlr0, inner_product = inner_product)
 
-    # initial relative residual norm
-    relresvec = [norm_MMlr0 / norm_MMlb]
+    # if rhs is exactly(!) zero, return zero solution.
+    if norm_MMlb==0:
+        x0 = numpy.zeros((N,1))
+        relresvec = [0.0]
+    else:
+        # initial relative residual norm
+        relresvec = [norm_MMlr0 / norm_MMlb]
     xk = x0.copy()
-    info = 0
 
     # compute error?
     if exact_solution is not None:
@@ -216,15 +383,12 @@ def minres(A, b,
         # some small helpers
         ts = 0.0           # (non-existing) first off-diagonal entry (corresponds to pi1)
         y  = [norm_MMlr0, 0] # first entry is (updated) residual
-        G2 = numpy.eye(2)     # old givens rotation
-        G1 = numpy.eye(2)     # even older givens rotation ;)
+        G2 = None            # old givens rotation
+        G1 = None            # even older givens rotation ;)
         k = 0
 
         # resulting approximation is xk = x0 + Mr*yk
         yk = numpy.zeros((N,1), dtype=cdtype)
-
-        if timer:
-            times['setup'][0] = time.time()-start
 
     # --------------------------------------------------------------------------
     # Lanczos + MINRES iteration
@@ -232,29 +396,19 @@ def minres(A, b,
     while relresvec[-1] > tol and k < maxiter:
         # ---------------------------------------------------------------------
         # Lanczos
-        if timer:
-            start = time.time()
         tsold = ts
-        z  = utils.apply(Mr, V[:,[1]])
-        z  = utils.apply(A, z)
-        z  = utils.apply(Ml, z)
-        if timer:
-            times['apply Ml*A*Mr'][k] = time.time()-start
-
-        if timer:
-            start = time.time()
+        z  = Mr * V[:,[1]]
+        z  = A * z
+        z  = Ml * z
         z  = z - tsold * P[:,[0]]
+
         # Should be real! (diagonal element):
         td = inner_product(V[:,[1]], z)[0,0]
         if abs(td.imag) > 1.0e-12:
             warnings.warn('Iter %d: abs(td.imag) = %g > 1e-12' % (k+1, abs(td.imag)))
         td = td.real
         z  = z - td * P[:,[1]]
-        if timer:
-            times['Lanczos'][k] = time.time()-start
 
-        if timer:
-            start = time.time()
         # double reortho
         for l in range(0,2):
             # full reortho?
@@ -268,43 +422,27 @@ def minres(A, b,
                     if abs(ip) > 1.0e-9:
                         warnings.warn('Iter %d: abs(ip) = %g > 1.0e-9: The Krylov basis has become linearly dependent. Maxiter (%d) too large and tolerance too severe (%g)? dim = %d.' % (k+1, abs(ip), maxiter, tol, len(x0)))
                     z -= ip * Pfull[:,[i]]
-        if timer:
-            times['reortho'][k] = time.time()-start
 
         # needed for QR-update:
-        R = utils.apply(G1, [0, tsold])
-        R = numpy.append(R, [0.0, 0.0])
+        R = numpy.zeros( (4,1) )
+        R[1] = tsold
+        if G1 is not None:
+            R[:2] = G1.apply(R[:2])
 
         # Apply the preconditioner.
-        if timer:
-            start = time.time()
-        v  = utils.apply(M, z)
-        alpha = inner_product(z, v)[0,0]
-        if abs(alpha.imag)>1e-12:
-            warnigs.warn('Iter %d: abs(alpha.imag) = %g > 1e-12' % (k+1, abs(alpha.imag)))
-        alpha = alpha.real
-        if alpha<0.0:
-            warnings.warn('Iter %d: alpha = %g < 0' % (k+1, alpha))
-            alpha = 0.0
-        ts = numpy.sqrt( alpha )
-        if timer:
-            times['apply prec'][k] = time.time()-start
+        v  = M * z
+        ts = utils.norm(z, Mx=v, inner_product=inner_product)
 
-        if timer:
-            start = time.time()
+
         if ts > 0.0:
             P  = numpy.c_[P[:,[1]], z / ts]
             V  = numpy.c_[V[:,[1]], v / ts]
         else:
             P  = numpy.c_[P[:,[1]], numpy.zeros(N)]
             V  = numpy.c_[V[:,[1]], numpy.zeros(N)]
-        if timer:
-            times['extend Krylov'][k] = time.time()-start
 
 
         # store new vectors in full basis
-        if timer:
-            start = time.time()
         if return_basis or full_reortho:
             if ts>0.0:
                 Vfull[:,[k+1]] = v / ts
@@ -313,44 +451,29 @@ def minres(A, b,
             Hfull[k+1,k] = ts      # subdiagonal
             if k+1 < maxiter:
                 Hfull[k,k+1] = ts  # superdiagonal
-        if timer:
-            times['construct full basis'][k] = time.time()-start
 
         # ----------------------------------------------------------------------
         # (implicit) update of QR-factorization of Lanczos matrix
-        if timer:
-            start = time.time()
-        R[2:4] = [td, ts]
-        R[1:3] = utils.apply(G2, R[1:3])
-        G1 = G2.copy()
+        R[2:4,0] = [td, ts]
+        if G2 is not None:
+            R[1:3] = G2.apply(R[1:3])
+        G1 = G2
         # compute new givens rotation.
-        gg = numpy.linalg.norm( R[2:4] )
-        gc = R[2] / gg
-        gs = R[3] / gg
-        G2 = numpy.array([ [gc,  gs],
-                        [-gs, gc] ])
-        R[2] = gg
+        G2 = utils.Givens(R[2:4])
+        R[2] = G2.r
         R[3] = 0.0
-        y = utils.apply(G2, y)
-        if timer:
-            times['implicit QR'][k] = time.time()-start
+        y = G2.apply(y)
 
         # ----------------------------------------------------------------------
         # update solution
-        if timer:
-            start = time.time()
         z  = (V[:,0:1] - R[0]*W[:,0:1] - R[1]*W[:,1:2]) / R[2]
         W  = numpy.c_[W[:,1:2], z]
         yk = yk + y[0] * z
         y  = [y[1], 0]
-        if timer:
-            times['update solution'][k] = time.time()-start
 
         # update residual
-        if timer:
-            start = time.time()
         if exact_solution is not None:
-            xk = x0 + utils.apply(Mr, yk)
+            xk = x0 + Mr * yk
             errvec.append(utils.norm(exact_solution - xk, inner_product=inner_product))
 
         if explicit_residual:
@@ -372,15 +495,12 @@ def minres(A, b,
                 if k+1 == maxiter:
                     warnings.warn('Iter %d: No convergence! expl. res = %e >= tol =%e in last iter. (upd. res = %e)' \
                         % (k+1, relresvec[-1], tol, norm_r_upd))
-                    info = 1
                 else:
                     warnings.warn( ( 'Info (iter %d): Updated residual is below tolerance, '
                           + 'explicit residual is NOT!\n  (resEx=%g > tol=%g >= '
                           + 'resup=%g)\n' \
                           ) % (k+1, relresvec[-1], tol, norm_r_upd) )
 
-        if timer:
-            times['update residual'][k] = time.time()-start
 
         # limit relative residual to machine precision (an exact 0 is rare but
         # seems to occur with pyamg...).
@@ -389,74 +509,219 @@ def minres(A, b,
     # end MINRES iteration
 
     ret = { 'xk': xk if not flat_vecs else numpy.ndarray.flatten(xk),
-            'info': info,
+            'info': relresvec[-1] <= tol,
             'relresvec': relresvec
             }
     if exact_solution is not None:
         ret['errvec'] = errvec
     if return_basis:
-        ret['Vfull'] = Vfull[:,0:k+1]
-        ret['Pfull'] = Pfull[:,0:k+1]
-        ret['Hfull'] = Hfull[0:k+1,0:k]
-    if timer:
-        # properly cut down times
-        for key in times:
-            times[key] = times[key][:k]
-        ret['times'] = times
+        ret['V'] = Vfull[:,0:k+1]
+        ret['P'] = Pfull[:,0:k+1]
+        ret['H'] = Hfull[0:k+1,0:k]
     return ret
 
 # ==============================================================================
-def gmres( A, b, 
+def gmres( A, b,
            x0 = None,
            tol = 1e-5,
            maxiter = None,
            M = None,
            Ml = None,
            Mr = None,
-           inner_product = utils.ip,
+           inner_product = utils.ip_euclid,
            explicit_residual = False,
            return_basis = False,
            full_reortho = True,
-           exact_solution = None
+           exact_solution = None,
+           max_restarts = 0
          ):
-    '''Preconditioned GMRES
+    '''Preconditioned GMRES method.
 
-    Solves   M*Ml*A*Mr*y = M*Ml*b,  x=Mr*y.
-    M has to be self-adjoint and positive-definite w.r.t. inner_product.
+    The *preconditioned generalized minimal residual method* can be used to
+    solve a system of linear algebraic equations. Let the following linear
+    algebraic system be given:
 
-    Stopping criterion is
-    ||M*Ml*(b-A*(x0+Mr*yk))||_{M^{-1}} / ||M*Ml*b||_{M^{-1}} <= tol
+    .. math::
+
+      M M_l A M_r y = M M_l b,
+
+    where :math:`x=M_r y`.
+    The preconditioned GMRES method then computes (in exact arithmetics!)
+    iterates :math:`x_k \\in x_0 + M_r K_k` with
+    :math:`K_k:= K_k(M M_l A M_r, r_0)` such that
+
+    .. math::
+
+      \\|M M_l(b - A x_k)\\|_{M^{-1}} =
+      \\min_{z \\in x_0 + M_r K_k} \\|M M_l (b - A z)\\|_{M^{-1}}.
+
+    The Arnoldi alorithm is used with the operator
+    :math:`M M_l A M_r` and the inner product defined by
+    :math:`\\langle x,y \\rangle_{M^{-1}} = \\langle M^{-1}x,y \\rangle`.
+    The initial vector for Arnoldi is
+    :math:`r_0 = M M_l (b - Ax_0)` - note that :math:`M_r` is not used for
+    the initial vector.
 
     Memory consumption is about maxiter+1 vectors for the Arnoldi basis.
-    If M is used the memory consumption is 2*(maxiter+1).
+    If :math:`M` is used the memory consumption is 2*(maxiter+1).
+
+    If the operator :math:`M_l A M_r` is self-adjoint then consider using
+    the MINRES method :py:meth:`minres`.
+
+    :param A:
+      a linear operator on :math:`\\mathbb{C}^N`.
+    :param b:
+      a vector in :math:`\\mathbb{C}^N`.
+    :param x0: (optional) the initial guess to use. Defaults to zero vector.
+      Unless you have a good reason to use a nonzero initial guess you should
+      use the zero vector, cf. chapter 5.8.3 in *Liesen, Strakos. Krylov
+      subspace methods. 2013*. See also :py:meth:`~krypy.utils.hegedus`.
+    :param tol: (optional) the tolerance for the stopping criterion with
+      respect to the relative residual norm:
+
+      .. math::
+
+         \\frac{ \\| M M_l (b-A (x_0+M_r y_k))\\|_{M^{-1}} }{ \\|M M_l b\\|_{M^{-1}}}
+         \leq \\text{tol}
+
+    :param maxiter: (optional)
+      maximum number of iterations per restart cycle, see ``max_restarts``.
+      Has to fulfill :math:`\\text{maxiter}\leq N`. Defaults to N.
+    :param M: (optional)
+      a self-adjoint and positive definite preconditioner, linear operator on
+      :math:`\\mathbb{C}^N` with respect to ``inner_product``. This
+      preconditioner changes the inner product used for orthogonalization to
+      :math:`\\langle x,y\\rangle_M = \\langle Mx,y\\rangle` where
+      :math:`\\langle \cdot,\cdot\\rangle` is the inner product defined by the
+      parameter ``inner_product``. Defaults to the identity.
+    :param Ml: (optional) left preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`. Defaults to the identity.
+    :param Mr: (optional) right preconditioner, linear operator on
+      :math:`\\mathbb{C}^N`.  Defaults to the identity.
+    :param inner_product: (optional) a function that takes two arguments and
+      computes the (block-) inner product of the arguments. Defaults to
+      :py:meth:`~krypy.utils.ip_euclid`.
+    :param explicit_residual: (optional)
+      if set to ``False`` (default), the updated residual norm from the GMRES
+      iteration is used in each iteration. If set to ``True``, the residual is
+      computed explicitly in each iteration and thus requires an additional
+      matrix-vector multiplication in each iteration.
+    :param return_basis: (optional)
+      if set to ``True`` then the computed Arnoldi basis and the Hessenberg
+      matrix are returned in the result dictionary with the keys ``V``
+      and ``H``. Defaults to ``False``.
+    :param exact_solution:
+      if the solution vector :math:`x` is passed then the error norm
+      :math:`\|x-x_k\|` will be computed in each iteration (with respect to
+      ``inner_product``) and returned as a list in the result dictionary with
+      the key ``errvec``. Defaults to ``None``, which means that no errors
+      are computed.
+    :param max_restarts: the maximum number of restarts. The maximum number of
+      iterations is ``(max_restarts+1)*maxiter``.
+
+    :return:
+      a dictionary with the following keys:
+
+      * ``xk``: the approximate solution :math:`x_k`.
+      * ``info``: convergence flag (0 if converged, 1 otherwise).
+      * ``relresvec``: relative residual norms of all iterations, see
+        parameter ``tol``.
+      * ``V``: present if ``return_basis=True``. The Arnoldi basis
+        vectors.
+      * ``H``: present if ``return_basis=True``. The Hessenberg matrix.
+      * ``P``: present if ``return_basis=True`` and ``M`` is provided.
+        The matrix :math:`P` fulfills :math:`V=MP`.
     '''
+    relresvec = [numpy.Inf]
+    if exact_solution is not None:
+        errvec = [numpy.Inf]
+    sols = []
+    xk = x0
+    restart = 0
+    while relresvec[-1] > tol and restart <= max_restarts:
+        sol = _gmres( A, b,
+                xk,
+                tol,
+                maxiter,
+                M,
+                Ml,
+                Mr,
+                inner_product,
+                explicit_residual,
+                return_basis,
+                full_reortho,
+                exact_solution,
+                # enable warnings in last restart
+                conv_warning = (restart==max_restarts))
+        xk = sol['xk']
+        del relresvec[-1]
+        relresvec += sol['relresvec']
+        if exact_solution is not None:
+            del errvec[-1]
+            errvec += sol['errvec']
+        sols.append(sol)
+        restart += 1
+    ret = {
+            'xk': xk,
+            'info': relresvec[-1] <= tol,
+            'relresvec': relresvec
+            }
+    if exact_solution is not None:
+        ret['errvec'] = errvec
+    if max_restarts == 0:
+        if return_basis:
+            ret['V'] = sol['V']
+            ret['H'] = sol['H']
+            if M is not None:
+                ret['P'] = sol['P']
+    return ret
+
+def _gmres( A, b,
+        x0,
+        tol,
+        maxiter,
+        M,
+        Ml,
+        Mr,
+        inner_product,
+        explicit_residual,
+        return_basis,
+        full_reortho,
+        exact_solution,
+        conv_warning):
     if not full_reortho:
-        raise RuntimeError('full_reortho=False not allowed in GMRES ')
-    # --------------------------------------------------------------------------
-    def _compute_explicit_xk(H, V, y):
-        '''Compute approximation xk to the solution.'''
-        if (H.shape[0]>0):
-            yy = numpy.linalg.solve(H, y)
-            u  = utils.apply(Mr, numpy.dot(V, yy))
-            return x0+u
-        return x0
-    # --------------------------------------------------------------------------
-    def _compute_explicit_residual( xk ):
-        '''Compute residual explicitly.'''
-        rk  = b - utils.apply(A, xk)
-        rk  = utils.apply(Ml, rk)
-        Mrk  = utils.apply(M, rk);
-        norm_Mrk = utils.norm(rk, Mrk, inner_product=inner_product)
-        return Mrk, norm_Mrk
-    # --------------------------------------------------------------------------
+        raise RuntimeError('full_reortho=False not allowed in GMRES')
 
     N = len(b)
+    shape = (N,N)
+    A = utils.get_linearoperator(shape, A)
     if not maxiter:
         maxiter = N
     flat_vecs, (b, x0, exact_solution) = utils.shape_vecs(b, x0, exact_solution)
     if x0 is None:
         x0 = numpy.zeros((N,1))
+    M = utils.get_linearoperator(shape, M)
+    Ml = utils.get_linearoperator(shape, Ml)
+    Mr = utils.get_linearoperator(shape, Mr)
     cdtype = utils.find_common_dtype(A, b, x0, M, Ml, Mr)
+
+    # --------------------------------------------------------------------------
+    def _compute_explicit_xk(H, V, y):
+        '''Compute approximation xk to the solution.'''
+        if (H.shape[0]>0):
+            yy = numpy.linalg.solve(H, y)
+            u  = Mr * numpy.dot(V, yy)
+            return x0+u
+        return x0
+    # --------------------------------------------------------------------------
+    def _compute_explicit_residual( xk ):
+        '''Compute residual explicitly.'''
+        rk  = b - A * xk
+        rk  = Ml * rk
+        Mrk  = M * rk
+        norm_Mrk = utils.norm(rk, Mrk, inner_product=inner_product)
+        return Mrk, norm_Mrk
+    # --------------------------------------------------------------------------
 
     # get memory for working variables
     V = numpy.zeros([N, maxiter+1], dtype=cdtype) # Arnoldi basis
@@ -470,16 +735,16 @@ def gmres( A, b,
         Horig = numpy.zeros([maxiter+1,maxiter], dtype=cdtype)
 
     # initialize working variables
-    Mlb = utils.apply(Ml, b)
-    MMlb = utils.apply(M, Mlb)
+    Mlb = Ml * b
+    MMlb = M * Mlb
     norm_MMlb = utils.norm(Mlb, MMlb, inner_product=inner_product)
     # This may only save us the application of Ml to the same vector again if
     # x0 is the zero vector.
     norm_x0 = utils.norm(x0, inner_product=inner_product)
     if norm_x0 > numpy.finfo(float).eps:
-        r0 = b - utils.apply(A, x0)
-        Mlr0 = utils.apply(Ml, r0)
-        MMlr0 = utils.apply(M, Mlr0);
+        r0 = b - A * x0
+        Mlr0 = Ml * r0
+        MMlr0 = M * Mlr0
         norm_MMlr0 = utils.norm(Mlr0, MMlr0, inner_product=inner_product)
     else:
         x0 = numpy.zeros( (N,1) )
@@ -487,9 +752,13 @@ def gmres( A, b,
         MMlr0 = MMlb.copy()
         norm_MMlr0 = norm_MMlb
 
-    # initial relative residual norm
-    relresvec = [norm_MMlr0 / norm_MMlb]
-    info = 0
+    # if rhs is exactly(!) zero, return zero solution.
+    if norm_MMlb==0:
+        x0 = numpy.zeros((N,1))
+        relresvec = [0.0]
+    else:
+        # initial relative residual norm
+        relresvec = [norm_MMlr0 / norm_MMlb]
 
     # compute error?
     if exact_solution is not None:
@@ -508,7 +777,7 @@ def gmres( A, b,
     k = 0
     while relresvec[-1] > tol and k < maxiter:
         # Apply operator Ml*A*Mr
-        z = utils.apply(Ml, utils.apply(A, utils.apply(Mr, V[:, [k]])))
+        z = Ml * (A * (Mr * V[:, [k]]))
 
         # orthogonalize (MGS)
         for i in range(k+1):
@@ -518,7 +787,7 @@ def gmres( A, b,
             else:
                 H[i, k] += inner_product(V[:, [i]], z)[0,0]
                 z -= H[i, k] * V[:, [i]]
-        Mz = utils.apply(M, z);
+        Mz = M * z
         norm_Mz = utils.norm(z, Mz, inner_product=inner_product)
         H[k+1,k] = norm_Mz
         if return_basis:
@@ -526,12 +795,12 @@ def gmres( A, b,
 
         # Apply previous Givens rotations.
         for i in range(k):
-            H[i:i+2, k] = utils.apply(G[i], H[i:i+2, k])
+            H[i:i+2, k] = G[i].apply(H[i:i+2, k])
 
         # Compute and apply new Givens rotation.
-        G.append(utils.givens(H[k, k], H[k+1, k]))
-        H[k:k+2, k] = utils.apply(G[k], H[k:k+2, k])
-        y[k:k+2] = utils.apply(G[k], y[k:k+2])
+        G.append(utils.Givens(H[k:k+2, [k]]))
+        H[k:k+2, k] = G[k].apply(H[k:k+2, k])
+        y[k:k+2] = G[k].apply(y[k:k+2])
 
         if exact_solution is not None:
             xk = _compute_explicit_xk(H[:k+1, :k+1], V[:, :k+1], y[:k+1])
@@ -558,32 +827,32 @@ def gmres( A, b,
             if relresvec[-1] >= tol:
                 # Was this the last iteration?
                 if k+1 == maxiter:
-                    warnings.warn('Iter %d: No convergence! expl. res = %e >= tol =%e in last it. (upd. res = %e)' \
-                        % (k+1, relresvec[-1], tol, norm_ur))
-                    info = 1
+                    if conv_warning:
+                        warnings.warn('Iter %d: No convergence! expl. res = %e >= tol =%e in last it. (upd. res = %e)' \
+                            % (k+1, relresvec[-1], tol, norm_ur))
                 else:
-                    warnings.warn('Iter %d: Expl. res = %e >= tol = %e > upd. res = %e.' \
-                        % (k+1, relresvec[-1], tol, norm_ur))
+                    if conv_warning:
+                        warnings.warn('Iter %d: Expl. res = %e >= tol = %e > upd. res = %e.' \
+                            % (k+1, relresvec[-1], tol, norm_ur))
 
-        if relresvec[-1] > tol:
-            if norm_Mz < 1e-14:
-                warnings.warn('subdiagonal element is (close to) zero (%e) => breakdown in iteration %d' % (norm_Mz, k))
-            if M is not None:
-                P[:, [k+1]] = z / norm_Mz
-            V[:, [k+1]] = Mz / norm_Mz
+        if norm_Mz < 1e-14 and relresvec[-1] > tol:
+            warnings.warn('subdiagonal element is (close to) zero (%e) => breakdown in iteration %d' % (norm_Mz, k))
+        if M is not None:
+            P[:, [k+1]] = z / norm_Mz
+        V[:, [k+1]] = Mz / norm_Mz
 
         k += 1
 
     xk = _compute_explicit_xk(H[:k,:k], V[:,:k], y[:k])
     ret = { 'xk': xk if not flat_vecs else numpy.ndarray.flatten(xk),
-            'info': info,
+            'info': relresvec[-1] <= tol,
             'relresvec': relresvec
             }
     if exact_solution is not None:
         ret['errvec'] = errvec
     if return_basis:
-        ret['Vfull'] = V[:, :k+1]
-        ret['Hfull'] = Horig[:k+1, :k]
+        ret['V'] = V[:, :k+1]
+        ret['H'] = Horig[:k+1, :k]
         if M is not None:
-            ret['Pfull'] = P[:, :k+1]
+            ret['P'] = P[:, :k+1]
     return ret
