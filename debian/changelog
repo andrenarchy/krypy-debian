@@ -1,3 +1,9 @@
+krypy (1.0.1) raring; urgency=low
+
+  * new upstream version
+
+ -- André Gaul <gaul@web-yard.de>  Wed, 24 Jul 2013 16:02:48 +0200
+
 krypy (1.0.0ubuntu1) raring; urgency=low
 
   * add Python 3 package.
